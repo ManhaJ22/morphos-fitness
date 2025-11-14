@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Morphos Inference Service Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .video-container {
+            position: relative;
+        }
+        #videoElement {
+            width: 640px;
+            height: 480px;
+            background-color: #ddd;
+            border: 1px solid #999;
+        }
+        #canvasElement {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 640px;
+            height: 480px;
+            pointer-events: none;
+        }
+        #controls {
+            margin-top: 10px;
+        }
+        button {
+            padding: 8px 16px;
+            margin-right: 10px;
+        }
+        #results {
+            width: 100%;
+            height: 200px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+            background-color: #f9f9f9;
+            font-family: monospace;
+        }
+        .stats {
+            margin-top: 10px;
+            font-size: 14px;
+        }
+        .slider-container {
+            margin-top: 10px;
+            display: flex;
+            align-items: center;
+        }
+        .slider-container label {
+            margin-right: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Morphos Inference Service Test</h1>
+    <div class="container">
+        <div class="video-container">
+            <video id="videoElement" autoplay playsinline></video>
+            <canvas id="canvasElement"></canvas>
+        </div>
+        <div id="controls">
+            <button id="startButton">Start Camera</button>
+            <button id="startStreamingButton" disabled>Start Streaming</button>
+            <button id="stopStreamingButton" disabled>Stop Streaming</button>
+            <button id="stopButton" disabled>Stop Camera</button>
+            
+            <div class="slider-container">
+                <label for="intervalSlider">Interval (ms):</label>
+                <input type="range" id="intervalSlider" min="100" max="2000" value="100" step="100">
+                <span id="intervalValue">100 ms</span>
+            </div>
+            
+            <div style="margin-top: 10px;">
+                <label for="inferenceUrl">Inference URL:</label>
+                <input type="text" id="inferenceUrl" value="https://morphos-inference-service-s4uldl3cvq-uc.a.run.app/inference" style="width: 400px;">
+            </div>
+            
+            <div class="stats">
+                <div>FPS: <span id="fpsValue">0</span></div>
+                <div>Processing Time: <span id="processingTime">0</span> ms</div>
+                <div>Frames Processed: <span id="framesProcessed">0</span></div>
+                <div>Frames with Detections: <span id="framesWithDetections">0</span></div>
+            </div>
+        </div>
+        
+        <div>
+            <h3>Results:</h3>
+            <pre id="results">Waiting for test results...</pre>
+        </div>
+    </div>
+    <script>
+        const video = document.getElementById('videoElement');
+        const canvas = document.getElementById('canvasElement');
+        const ctx = canvas.getContext('2d');
+        const startButton = document.getElementById('startButton');
+        const startStreamingButton = document.getElementById('startStreamingButton');
+        const stopStreamingButton = document.getElementById('stopStreamingButton');
+        const stopButton = document.getElementById('stopButton');
+        const inferenceUrl = document.getElementById('inferenceUrl');
+        const resultsElement = document.getElementById('results');
+        const intervalSlider = document.getElementById('intervalSlider');
+        const intervalValue = document.getElementById('intervalValue');
+        const fpsValue = document.getElementById('fpsValue');
+        const processingTime = document.getElementById('processingTime');
+        const framesProcessed = document.getElementById('framesProcessed');
+        const framesWithDetections = document.getElementById('framesWithDetections');
+        
+        let stream = null;
+        let streamingInterval = null;
+        let isProcessing = false;
+        let frameCount = 0;
+        let detectionCount = 0;
+        let lastFrameTime = 0;
+        let framesTimes = [];
+        
+        // Set canvas dimensions
+        canvas.width = 640;
+        canvas.height = 480;
+        
+        // Initialize webcam
+        async function initCamera() {
+            try {
+                const constraints = {
+                    video: {
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        frameRate: { ideal: 30 }
+                    }
+                };
+                
+                stream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = stream;
+                
+                return new Promise((resolve) => {
+                    video.onloadedmetadata = () => {
+                        resolve(true);
+                    };
+                });
+            } catch (err) {
+                console.error("Error accessing camera:", err);
+                log("❌ Error accessing camera: " + err.message);
+                return false;
+            }
+        }
+        
+        // Capture frame and test inference
+        async function captureAndTest() {
+            if (isProcessing) return; // Skip if already processing
+            
+            isProcessing = true;
+            const startProcessTime = performance.now();
+            
+            try {
+                // Draw current video frame to canvas
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                
+                // Get frame as base64 encoded image
+                const imageData = canvas.toDataURL('image/jpeg', 0.8);
+                
+                // Send to inference service
+                const response = await fetch(inferenceUrl.value, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        image: imageData
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                
+                // Update stats
+                frameCount++;
+                framesProcessed.textContent = frameCount;
+                
+                if (result.boxes && result.boxes.length > 0) {
+                    detectionCount++;
+                    framesWithDetections.textContent = detectionCount;
+                }
+                
+                // Process result
+                const processingTimeMs = Math.round(performance.now() - startProcessTime);
+                processingTime.textContent = processingTimeMs;
+                
+                // Draw bounding boxes
+                drawDetections(result.boxes);
+                
+                // Log results (but not for every frame to avoid flooding)
+                if (frameCount % 10 === 0) {
+                    log(`Processed frame #${frameCount} in ${processingTimeMs}ms with ${result.boxes.length} detections`);
+                    
+                    if (result.debug_info && result.debug_info.fallback_used) {
+                        log(`⚠️ Fallback detection used: ${result.debug_info.fallback_reason}`);
+                    }
+                }
+                
+                // Update FPS calculation
+                const now = performance.now();
+                framesTimes.push(now);
+                
+                // Only keep the last 10 frame times for FPS calculation
+                if (framesTimes.length > 10) {
+                    framesTimes.shift();
+                }
+                
+                if (framesTimes.length > 1) {
+                    const timeElapsed = now - framesTimes[0];
+                    const fps = ((framesTimes.length - 1) / timeElapsed) * 1000;
+                    fpsValue.textContent = fps.toFixed(1);
+                }
+                
+            } catch (err) {
+                log("❌ Error testing inference: " + err.message);
+                console.error("Error testing inference:", err);
+            } finally {
+                isProcessing = false;
+            }
+        }
+        
+        // Draw bounding boxes on canvas
+        function drawDetections(boxes) {
+            if (!boxes || boxes.length === 0) {
+                return;
+            }
+            
+            // Clear previous drawings
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Redraw the video frame
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            // Set drawing styles
+            ctx.lineWidth = 3;
+            ctx.font = '16px Arial';
+            ctx.textBaseline = 'top';
+            
+            boxes.forEach(box => {
+                // Generate a color based on class_id
+                const hue = (box.class_id * 137) % 360; // Distribute colors
+                ctx.strokeStyle = `hsl(${hue}, 100%, 40%)`;
+                ctx.fillStyle = `hsl(${hue}, 100%, 40%)`;
+                
+                // Draw bounding box
+                ctx.beginPath();
+                ctx.rect(box.x1, box.y1, box.x2 - box.x1, box.y2 - box.y1);
+                ctx.stroke();
+                
+                // Draw label background
+                const label = `${box.class_name} ${Math.round(box.confidence * 100)}%`;
+                const textWidth = ctx.measureText(label).width;
+                ctx.fillRect(box.x1, box.y1, textWidth + 10, 20);
+                
+                // Draw label text
+                ctx.fillStyle = 'white';
+                ctx.fillText(label, box.x1 + 5, box.y1);
+                
+                // Draw keypoints if available
+                if (box.keypoints && box.keypoints.length > 0) {
+                    box.keypoints.forEach((keypoint, index) => {
+                        // Only draw keypoints with sufficient confidence
+                        if (keypoint.confidence > 0.5) {
+                            // Different color for each keypoint type
+                            const keypointHue = (index * 30) % 360;
+                            ctx.fillStyle = `hsl(${keypointHue}, 100%, 60%)`;
+                            
+                            // Draw keypoint
+                            ctx.beginPath();
+                            ctx.arc(keypoint.x, keypoint.y, 4, 0, 2 * Math.PI);
+                            ctx.fill();
+                        }
+                    });
+                }
+            });
+        }
+        
+        // Start streaming
+        function startStreaming() {
+            if (streamingInterval) {
+                clearInterval(streamingInterval);
+            }
+            
+            const interval = parseInt(intervalSlider.value);
+            streamingInterval = setInterval(() => {
+                if (!isProcessing) {
+                    captureAndTest();
+                }
+            }, interval);
+            
+            startStreamingButton.disabled = true;
+            stopStreamingButton.disabled = false;
+            
+            log(`🎬 Started streaming with ${interval}ms interval`);
+        }
+        
+        // Stop streaming
+        function stopStreaming() {
+            if (streamingInterval) {
+                clearInterval(streamingInterval);
+                streamingInterval = null;
+            }
+            
+            startStreamingButton.disabled = false;
+            stopStreamingButton.disabled = true;
+            
+            log("⏹️ Stopped streaming");
+        }
+        
+        // Stop webcam
+        function stopCamera() {
+            if (stream) {
+                // Stop streaming if active
+                if (streamingInterval) {
+                    stopStreaming();
+                }
+                
+                stream.getTracks().forEach(track => track.stop());
+                video.srcObject = null;
+                stream = null;
+                
+                // Clear canvas
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                startButton.disabled = false;
+                startStreamingButton.disabled = true;
+                stopStreamingButton.disabled = true;
+                stopButton.disabled = true;
+                
+                log("📷 Camera stopped");
+            }
+        }
+        
+        // Check if server is running
+        async function checkInferenceService() {
+            try {
+                // Convert inference URL to health check URL
+                let healthUrl = inferenceUrl.value.replace('/inference', '/health');
+                
+                log(`🔍 Checking inference service health: ${healthUrl}`);
+                
+                const response = await fetch(healthUrl);
+                if (response.ok) {
+                    const data = await response.json();
+                    log(`✅ Inference service health check: ${JSON.stringify(data)}`);
+                    
+                    // Also check debug endpoint
+                    const debugUrl = inferenceUrl.value.replace('/inference', '/debug');
+                    try {
+                        const debugResponse = await fetch(debugUrl);
+                        if (debugResponse.ok) {
+                            const debugData = await debugResponse.json();
+                            log(`ℹ️ Inference service debug info:`);
+                            if (debugData.onnx_session_initialized) {
+                                log(`✅ ONNX session initialized: ${debugData.onnx_session_initialized}`);
+                            } else {
+                                log(`⚠️ ONNX session not initialized`);
+                            }
+                        }
+                    } catch (err) {
+                        // Debug endpoint is optional
+                    }
+                    
+                } else {
+                    log(`❌ Inference service health check failed: ${response.status}`);
+                }
+            } catch (err) {
+                log(`❌ Cannot reach inference service: ${err.message}`);
+            }
+        }
+        
+        // Log message to results area
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            resultsElement.innerText = `[${timestamp}] ${message}\n\n` + resultsElement.innerText;
+        }
+        
+        // Event listeners
+        startButton.addEventListener('click', async () => {
+            log("📷 Starting camera...");
+            const success = await initCamera();
+            if (success) {
+                log("✅ Camera started successfully");
+                startButton.disabled = true;
+                startStreamingButton.disabled = false;
+                stopButton.disabled = false;
+                
+                // Check if inference service is available
+                checkInferenceService();
+            }
+        });
+        
+        startStreamingButton.addEventListener('click', startStreaming);
+        stopStreamingButton.addEventListener('click', stopStreaming);
+        stopButton.addEventListener('click', stopCamera);
+        
+        // Interval slider
+        intervalSlider.addEventListener('input', () => {
+            const value = intervalSlider.value;
+            intervalValue.textContent = `${value} ms`;
+            
+            // Update interval if streaming is active
+            if (streamingInterval) {
+                stopStreaming();
+                startStreaming();
+            }
+        });
+        
+        // Initial log
+        log("🚀 Test client ready. Click 'Start Camera' to begin testing the inference service.");
+    </script>
+</body>
+</html>
